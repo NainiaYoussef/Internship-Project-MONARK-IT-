@@ -1,5 +1,6 @@
 import streamlit as st
 import json
+import re
 from PyPDF2 import PdfReader
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import PromptTemplate
@@ -18,7 +19,8 @@ class Question(BaseModel):
     type: str = Field(default="MultiChoice")
     options: Optional[List[Option]] = None
     sampleAnswer: Optional[str] = None
-    context: str = Field(default="Source not cited.")
+    # REMOVED the default "Source not cited" to force the AI to provide real data
+    context: str = Field(validation_alias=AliasChoices("context", "source_quote", "evidence"))
 
 class Quiz(BaseModel):
     title: str = Field(validation_alias=AliasChoices("title", "quiz_name"))
@@ -31,29 +33,33 @@ base_parser = PydanticOutputParser(pydantic_object=Quiz)
 
 if "quiz_data" not in st.session_state: st.session_state.quiz_data = None
 
-# --- 3. THE REPAIR ENGINE ---
+# --- 3. THE REPAIR ENGINE (With Evidence-Recovery) ---
 def robust_parse(completion):
-    """Manually cleans the AI output before Pydantic sees it."""
     try:
-        # Extract JSON if the model included conversational filler
         json_str = re.search(r"\{.*\}", completion, re.DOTALL).group()
         data = json.loads(json_str)
         
-        # FIX: If 'options' are strings, convert them to objects
         for q in data.get("questions", []):
+            # MCQ FIX
             if "options" in q and isinstance(q["options"], list):
                 new_opts = []
                 for opt in q["options"]:
                     if isinstance(opt, str):
-                        # Assume the first option generated is the correct one if AI forgot booleans
-                        new_opts.append({"text": opt, "isCorrect": "result" in opt.lower() or "correct" in opt.lower()})
+                        new_opts.append({"text": opt, "isCorrect": "correct" in opt.lower()})
                     else:
                         new_opts.append(opt)
                 q["options"] = new_opts
+            
+            # EVIDENCE RECOVERY FIX:
+            # If the AI forgot 'context' but put a quote in 'sampleAnswer', we swap them.
+            if not q.get("context") or q.get("context") == "Source not cited.":
+                if q.get("sampleAnswer") and len(q["sampleAnswer"]) > 20:
+                    q["context"] = q["sampleAnswer"]
+                else:
+                    q["context"] = "Refer to the uploaded document for this answer."
         
         return base_parser.parse(json.dumps(data))
     except Exception:
-        # Fallback to standard parser if manual clean fails
         return base_parser.parse(completion)
 
 def process_document(pdf_file, q_type, count):
@@ -62,10 +68,12 @@ def process_document(pdf_file, q_type, count):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=3500, chunk_overlap=200)
     docs = text_splitter.split_text(raw_text)
 
+    # We use very aggressive wording here to make the AI scared to skip the context
     prompt = PromptTemplate(
         template="""[INST] <<SYS>>
-        You are an academic examiner. 
-        MANDATORY: For MultiChoice, options MUST be objects: {{"text": "...", "isCorrect": true/false}}.
+        You are a meticulous academic examiner. 
+        MANDATORY: You MUST fill the 'context' field with the EXACT sentence from the text that proves the answer. 
+        NEVER leave the 'context' field empty.
         {format_instructions}
         <</SYS>>
         Generate {count} {q_type} questions based on: {text} [/INST]""",
@@ -73,11 +81,10 @@ def process_document(pdf_file, q_type, count):
         partial_variables={"format_instructions": base_parser.get_format_instructions()}
     )
 
-    # We call the LLM directly so we can clean the string before parsing
     raw_response = llm.invoke(prompt.format(count=count, q_type=q_type, text=docs[0]))
     return robust_parse(raw_response)
 
-import re # Needed for the regex in robust_parse
+import re
 
 # --- 4. SIDEBAR ---
 with st.sidebar:
@@ -87,7 +94,7 @@ with st.sidebar:
     pdf = st.file_uploader("Upload PDF", type="pdf")
     
     if pdf and st.button("Generate Quiz"):
-        with st.spinner("Processing..."):
+        with st.spinner("Analyzing and extracting quotes..."):
             try:
                 st.session_state.quiz_data = process_document(pdf, q_format, q_count)
             except Exception as e:
@@ -102,7 +109,6 @@ if st.session_state.quiz_data:
         with st.container(border=True):
             st.markdown(f"**Q{i+1}: {q.questionText}**")
             
-            # Use the format selected in sidebar to decide the UI
             if q_format == "MultiChoice" and q.options:
                 choices = [o.text for o in q.options]
                 ans = st.radio("Select one:", choices, key=f"r{i}", index=None)
@@ -112,9 +118,10 @@ if st.session_state.quiz_data:
                     else: st.error(f"Incorrect. Answer: {correct}")
             else:
                 st.text_area("Answer:", key=f"t{i}")
-                if st.button("Check Reference", key=f"b{i}"):
-                    st.info(f"**Reference:** {q.sampleAnswer or 'See context.'}")
-                    st.caption(f"Evidence: {q.context}")
+                if st.button("Verify & View Source", key=f"b{i}"):
+                    # We show both the model answer AND the source evidence
+                    st.info(f"**Reference:** {q.sampleAnswer or 'Verify with the quote below.'}")
+                    st.success(f"**📍 Source Evidence from PDF:**\n\n{q.context}")
 
     with st.expander("🛠️ Raw Data"):
         st.json(quiz.dict())
