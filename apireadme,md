@@ -1,0 +1,245 @@
+# AI Pedagogical Platform — API Setup Guide
+
+## What you have after this setup
+- Your existing Streamlit app (`app.py`) works exactly as before
+- A new FastAPI server (`api.py`) runs alongside it
+- Any external platform can call your API via HTTP
+
+---
+
+## STEP 1 — Install dependencies
+
+Open a terminal in the folder where your files live and run:
+
+```bash
+pip install fastapi uvicorn[standard] pymupdf langchain-ollama langchain-core pydantic
+```
+
+Or install everything from the requirements file:
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## STEP 2 — Make sure Ollama is running
+
+Your API uses Gemma locally via Ollama.
+In a separate terminal, start Ollama:
+
+```bash
+ollama serve
+```
+
+Make sure Gemma is pulled:
+
+```bash
+ollama pull gemma3:4b
+```
+
+---
+
+## STEP 3 — Start the API server
+
+```bash
+uvicorn api:app --reload --port 8000
+```
+
+You will see:
+```
+INFO:     Uvicorn running on http://127.0.0.1:8000
+```
+
+Your API is now live. Open http://127.0.0.1:8000 in your browser to confirm.
+
+---
+
+## STEP 4 — Explore the interactive docs
+
+FastAPI generates automatic documentation.
+Open in your browser:
+
+```
+http://127.0.0.1:8000/docs
+```
+
+You can test every endpoint directly from the browser — upload a PDF, call /grade, etc.
+
+---
+
+## STEP 5 — Test the API with curl
+
+### Test /digitize (upload an exam PDF):
+```bash
+curl -X POST http://localhost:8000/digitize \
+  -F "file=@your_exam.pdf" \
+  -F "dpi=150"
+```
+
+Response:
+```json
+{
+  "total": 40,
+  "questions": [
+    {
+      "number": 1,
+      "stem": "The diagram shows a plant. Which characteristic...",
+      "type": "MCQ",
+      "options": { "A": "excretion", "B": "reproduction", "C": "respiration", "D": "sensitivity" },
+      "page": 1
+    },
+    ...
+  ],
+  "pages": ["data:image/png;base64,...", ...],
+  "figures": { "1": [{ "x": 120, "y": 80, "w": 300, "h": 200 }] }
+}
+```
+
+### Test /grade (grade a student answer):
+```bash
+curl -X POST http://localhost:8000/grade \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question_stem": "Why do plants need nitrate ions?",
+    "student_answer": "Plants need nitrates to make proteins.",
+    "reference_answer": "Nitrogen is a component of amino acids used to build proteins."
+  }'
+```
+
+Response:
+```json
+{
+  "score": 16,
+  "feedback": "Good answer. You identified the link to proteins but missed amino acids specifically.",
+  "missing_concepts": ["amino acids", "nitrogen as component"]
+}
+```
+
+---
+
+## STEP 6 — Share with another developer (local network)
+
+To let someone on the same network use your API, start with:
+
+```bash
+uvicorn api:app --reload --host 0.0.0.0 --port 8000
+```
+
+Find your local IP:
+- Mac/Linux: `ifconfig | grep inet`
+- Windows: `ipconfig`
+
+Tell them to call:
+```
+http://YOUR_IP_ADDRESS:8000
+```
+
+---
+
+## STEP 7 — Deploy to the internet (so anyone can use it)
+
+### Option A — Railway (easiest, free tier available)
+1. Create account at https://railway.app
+2. Push your code to GitHub
+3. Connect the GitHub repo to Railway
+4. Set start command: `uvicorn api:app --host 0.0.0.0 --port $PORT`
+5. Railway gives you a public URL like: `https://your-app.railway.app`
+
+### Option B — Render (also free tier)
+1. Create account at https://render.com
+2. New Web Service → connect GitHub repo
+3. Build command: `pip install -r requirements.txt`
+4. Start command: `uvicorn api:app --host 0.0.0.0 --port $PORT`
+
+### Option C — Your own server (VPS)
+```bash
+# On the server:
+git clone your-repo
+pip install -r requirements.txt
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Note: For cloud deployment, Ollama needs to run on the same server,
+or you can swap it for the Anthropic API / OpenAI API instead.
+
+---
+
+## STEP 8 — How the other developer uses your API
+
+Give them your base URL (e.g. https://your-app.railway.app) and this usage example:
+
+### JavaScript / React example:
+```javascript
+// Digitize an exam PDF
+async function digitizeExam(pdfFile) {
+  const formData = new FormData();
+  formData.append('file', pdfFile);
+  formData.append('dpi', '150');
+
+  const response = await fetch('https://your-api-url/digitize', {
+    method: 'POST',
+    body: formData,
+  });
+  const data = await response.json();
+  // data.questions = array of question objects
+  // data.pages     = array of base64 PNG strings
+  return data;
+}
+
+// Grade a student answer
+async function gradeAnswer(stem, studentAnswer) {
+  const response = await fetch('https://your-api-url/grade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      question_stem: stem,
+      student_answer: studentAnswer,
+    }),
+  });
+  const data = await response.json();
+  // data.score            = 0-20
+  // data.feedback         = string
+  // data.missing_concepts = array of strings
+  return data;
+}
+```
+
+### Python example:
+```python
+import requests
+
+# Digitize
+with open("exam.pdf", "rb") as f:
+    r = requests.post("https://your-api-url/digitize", files={"file": f})
+    data = r.json()
+    print(f"Found {data['total']} questions")
+
+# Grade
+r = requests.post("https://your-api-url/grade", json={
+    "question_stem": "Why do plants need nitrate ions?",
+    "student_answer": "For making proteins.",
+})
+print(r.json())
+```
+
+---
+
+## File structure summary
+
+```
+your_project/
+├── app.py           ← Your existing Streamlit app (unchanged)
+├── api.py           ← New FastAPI server
+├── requirements.txt ← All dependencies
+└── README.md        ← This guide
+```
+
+Run both at the same time in two terminals:
+```bash
+# Terminal 1 — Streamlit app
+streamlit run app.py
+
+# Terminal 2 — FastAPI server
+uvicorn api:app --reload --port 8000
+```
